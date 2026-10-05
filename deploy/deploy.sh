@@ -8,7 +8,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_NAME="insightcard-rag"
-AWS_REGION="${AWS_REGION:-us-east-1}"
+AWS_REGION="${AWS_REGION:-ap-northeast-1}"
 AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo '')"
 
 if [ -z "$AWS_ACCOUNT_ID" ]; then
