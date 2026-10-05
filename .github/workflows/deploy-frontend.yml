@@ -1,0 +1,32 @@
+name: Build and Deploy Frontend
+on:
+  push:
+    paths:
+      - "frontend/**"
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to ECR
+        run: aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+
+      - name: Build and push frontend image
+        run: |
+          docker build -t insightcard-rag/frontend:latest -f frontend/Dockerfile .
+          docker tag insightcard-rag/frontend:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/insightcard-rag/frontend:latest
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/insightcard-rag/frontend:latest
+
+      - name: Update ECS service
+        run: |
+          aws ecs update-service --cluster insightcard-rag-prod --service insightcard-rag-frontend --force-new-deployment

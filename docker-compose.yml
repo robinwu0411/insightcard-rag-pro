@@ -1,0 +1,41 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - VECTOR_STORE_TYPE=chromadb
+      - EMBEDDING_PROVIDER=local
+      - LLM_PROVIDER=openai
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - PYTHONPATH=/app
+    volumes:
+      - ./backend/knowledge_docs:/app/backend/knowledge_docs
+      - chroma_data:/tmp/insightcard_chromadb
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: ingestion/Dockerfile
+    environment:
+      - VECTOR_STORE_TYPE=chromadb
+      - EMBEDDING_PROVIDER=local
+      - PYTHONPATH=/app
+    volumes:
+      - ./backend/knowledge_docs:/app/backend/knowledge_docs
+      - chroma_data:/tmp/insightcard_chromadb
+    command: ["python", "-m", "ingestion.worker", "--mode", "batch"]
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  chroma_data:
