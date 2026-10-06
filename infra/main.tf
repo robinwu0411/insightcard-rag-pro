@@ -24,19 +24,6 @@ provider "aws" {
   region = var.aws_region
 }
 
-# --- Variables ---
-variable "aws_region" {
-  default = "us-east-1"
-}
-
-variable "project_name" {
-  default = "insightcard-rag"
-}
-
-variable "environment" {
-  default = "prod"
-}
-
 # --- S3 Bucket: Document Storage ---
 resource "aws_s3_bucket" "docs" {
   bucket = "${var.project_name}-docs-${var.environment}"
@@ -68,7 +55,7 @@ resource "aws_sqs_queue" "ingestion" {
   delay_seconds              = 0
   max_message_size           = 262144
   message_retention_seconds  = 86400    # 1 day
-  visibility_timeout         = 300      # 5 min (must >= max processing time)
+  visibility_timeout_seconds = 300      # 5 min (must >= max processing time)
   receive_wait_time_seconds  = 20       # long polling
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.ingestion_dlq.arn
@@ -93,7 +80,7 @@ resource "aws_sqs_queue_policy" "ingestion" {
 # --- DynamoDB: Metadata Table ---
 resource "aws_dynamodb_table" "metadata" {
   name         = "${var.project_name}_metadata"
-  billing_mode = PAY_PER_REQUEST
+  billing_mode = "PAY_PER_REQUEST"
   hash_key     = "PK"
   range_key    = "SK"
 
@@ -117,7 +104,7 @@ resource "aws_dynamodb_table" "metadata" {
 # --- DynamoDB: Short-Term Memory Table ---
 resource "aws_dynamodb_table" "memory" {
   name         = "${var.project_name}_memory"
-  billing_mode = PAY_PER_REQUEST
+  billing_mode = "PAY_PER_REQUEST"
   hash_key     = "PK"
   range_key    = "SK"
 
@@ -154,11 +141,42 @@ resource "aws_ecr_repository" "frontend" {
   image_tag_mutability = "MUTABLE"
 }
 
+# --- OpenSearch Domain (vector search) ---
+resource "aws_opensearch_domain" "main" {
+  domain_name    = var.project_name
+  engine_version = "OpenSearch_2.11"
+
+  cluster_config {
+    instance_type        = "t3.small.search"
+    instance_count       = 1
+    zone_awareness_enabled = false
+  }
+
+  ebs_options {
+    ebs_enabled = true
+    volume_size = 10
+  }
+
+  encrypt_at_rest { enabled = true }
+  node_to_node_encryption { enabled = true }
+  domain_endpoint_options { enforce_https = true }
+
+  access_policies = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { AWS = aws_iam_role.ecs_task.arn }
+      Action    = ["es:ESHttp*"]
+      Resource  = "arn:aws:es:${var.aws_region}:*:domain/${var.project_name}/*"
+    }]
+  })
+}
+
 # --- ECS Cluster ---
 resource "aws_ecs_cluster" "main" {
   name = "${var.project_name}-${var.environment}"
   setting {
-    name  = "containerinsights"
+    name  = "containerInsights"
     value = "enabled"
   }
 }
@@ -206,6 +224,7 @@ resource "aws_iam_role_policy" "ecs_task" {
         aws_sqs_queue.ingestion.arn, aws_sqs_queue.ingestion_dlq.arn ] },
       { Effect = "Allow", Action = ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:Query", "dynamodb:DeleteItem", "dynamodb:Scan"], Resource = [
         aws_dynamodb_table.metadata.arn, aws_dynamodb_table.memory.arn ] },
+      { Effect = "Allow", Action = ["es:ESHttp*"], Resource = "arn:aws:es:${var.aws_region}:*:domain/${var.project_name}/*" },
       { Effect = "Allow", Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource = "*" },
     ]
   })
@@ -220,6 +239,28 @@ resource "aws_cloudwatch_log_group" "backend" {
 resource "aws_cloudwatch_log_group" "ingestion" {
   name              = "/ecs/${var.project_name}/ingestion"
   retention_in_days = 30
+}
+
+# --- SSM Parameter: DeepSeek API Key (encrypted) ---
+resource "aws_ssm_parameter" "deepseek_api_key" {
+  name        = "/${var.project_name}/deepseek-api-key"
+  type        = "SecureString"
+  value       = var.deepseek_api_key
+  description = "DeepSeek API key for LLM generation (OpenAI-compatible endpoint)"
+}
+
+# Allow ECS execution role to read the SSM parameter
+resource "aws_iam_role_policy" "ecs_execution_ssm" {
+  name = "${var.project_name}-exec-ssm-read"
+  role = aws_iam_role.ecs_execution.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["ssm:GetParameters", "ssm:GetParameter"]
+      Resource = aws_ssm_parameter.deepseek_api_key.arn
+    }]
+  })
 }
 
 # --- Security Groups ---
@@ -280,19 +321,29 @@ data "aws_subnets" "default" {
 }
 
 resource "aws_lb_target_group" "frontend" {
-  name     = "${var.project_name}-frontend-tg"
-  port     = 80
-  protocol = "HTTP"
-  vpc_id   = data.aws_vpc.default.id
-  health_check { path = "/", healthy_threshold = 2, unhealthy_threshold = 3 }
+  name        = "${var.project_name}-frontend-tg"
+  port        = 80
+  protocol    = "HTTP"
+  vpc_id      = data.aws_vpc.default.id
+  target_type = "ip"
+  health_check {
+    path                = "/"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
 }
 
 resource "aws_lb_target_group" "backend" {
-  name     = "${var.project_name}-backend-tg"
-  port     = 8000
-  protocol = "HTTP"
-  vpc_id   = data.aws_vpc.default.id
-  health_check { path = "/api/health", healthy_threshold = 2, unhealthy_threshold = 3 }
+  name        = "${var.project_name}-backend-tg"
+  port        = 8000
+  protocol    = "HTTP"
+  vpc_id      = data.aws_vpc.default.id
+  target_type = "ip"
+  health_check {
+    path                = "/api/health"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
 }
 
 data "aws_vpc" "default" {
@@ -335,19 +386,27 @@ resource "aws_ecs_task_definition" "backend" {
     name      = "backend"
     image     = "${aws_ecr_repository.backend.repository_url}:latest"
     essential = true
-    port_mappings = [{ containerPort = 8000, protocol = "tcp" }]
+    portMappings = [{ containerPort = 8000, protocol = "tcp" }]
     environment = [
-      { name = "VECTOR_STORE_TYPE", value = "milvus" },
-      { name = "MILVUS_HOST", value = "milvus-service.default.svc.cluster.local" },
+      { name = "VECTOR_STORE_TYPE", value = "opensearch" },
+      { name = "OPENSEARCH_HOST", value = aws_opensearch_domain.main.endpoint },
+      { name = "OPENSEARCH_PORT", value = "443" },
+      { name = "OPENSEARCH_SSL", value = "true" },
+      { name = "OPENSEARCH_AUTH", value = "aws" },
       { name = "EMBEDDING_PROVIDER", value = "local" },
       { name = "LLM_PROVIDER", value = "openai" },
+      { name = "LLM_MODEL", value = "deepseek-chat" },
+      { name = "OPENAI_BASE_URL", value = "https://api.deepseek.com" },
       { name = "AWS_REGION", value = var.aws_region },
       { name = "S3_BUCKET", value = aws_s3_bucket.docs.id },
       { name = "SQS_QUEUE_URL", value = aws_sqs_queue.ingestion.url },
       { name = "DDB_TABLE_METADATA", value = aws_dynamodb_table.metadata.name },
       { name = "DDB_TABLE_MEMORY", value = aws_dynamodb_table.memory.name },
     ]
-    log_configuration = {
+    secrets = [
+      { name = "OPENAI_API_KEY", valueFrom = aws_ssm_parameter.deepseek_api_key.arn }
+    ]
+    logConfiguration = {
       logDriver = "awslogs"
       options = {
         "awslogs-group"         = aws_cloudwatch_log_group.backend.name
@@ -372,8 +431,11 @@ resource "aws_ecs_task_definition" "ingestion" {
     image     = "${aws_ecr_repository.ingestion.repository_url}:latest"
     essential = true
     environment = [
-      { name = "VECTOR_STORE_TYPE", value = "milvus" },
-      { name = "MILVUS_HOST", value = "milvus-service.default.svc.cluster.local" },
+      { name = "VECTOR_STORE_TYPE", value = "opensearch" },
+      { name = "OPENSEARCH_HOST", value = aws_opensearch_domain.main.endpoint },
+      { name = "OPENSEARCH_PORT", value = "443" },
+      { name = "OPENSEARCH_SSL", value = "true" },
+      { name = "OPENSEARCH_AUTH", value = "aws" },
       { name = "EMBEDDING_PROVIDER", value = "local" },
       { name = "AWS_REGION", value = var.aws_region },
       { name = "S3_BUCKET", value = aws_s3_bucket.docs.id },
@@ -381,7 +443,7 @@ resource "aws_ecs_task_definition" "ingestion" {
       { name = "DDB_TABLE_METADATA", value = aws_dynamodb_table.metadata.name },
       { name = "DDB_TABLE_MEMORY", value = aws_dynamodb_table.memory.name },
     ]
-    log_configuration = {
+    logConfiguration = {
       logDriver = "awslogs"
       options = {
         "awslogs-group"         = aws_cloudwatch_log_group.ingestion.name
@@ -404,7 +466,7 @@ resource "aws_ecs_task_definition" "frontend" {
     name      = "frontend"
     image     = "${aws_ecr_repository.frontend.repository_url}:latest"
     essential = true
-    port_mappings = [{ containerPort = 80, protocol = "tcp" }]
+    portMappings = [{ containerPort = 80, protocol = "tcp" }]
   }])
 }
 
@@ -508,6 +570,10 @@ resource "aws_cloudwatch_metric_alarm" "backend_5xx" {
 # --- Outputs ---
 output "alb_dns" {
   value = aws_lb.main.dns_name
+}
+
+output "opensearch_endpoint" {
+  value = aws_opensearch_domain.main.endpoint
 }
 
 output "s3_bucket" {

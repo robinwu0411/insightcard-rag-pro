@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure terraform + aws are findable
+export PATH="/usr/local/bin:/Users/robinwu/.local/bin:$PATH"
+
 # ============================================================
 #  InsightCard RAG Pro — One-Click Deploy Script
 #  Usage: ./deploy/deploy.sh [--build] [--push] [--terraform] [--deploy]
@@ -8,7 +11,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_NAME="insightcard-rag"
-AWS_REGION="${AWS_REGION:-ap-northeast-1}"
+AWS_REGION="${AWS_REGION:-us-east-1}"
 AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo '')"
 
 if [ -z "$AWS_ACCOUNT_ID" ]; then
@@ -24,9 +27,10 @@ echo "============================================================"
 
 # --- Step 1: Build Docker images ---
 build_images() {
-  echo "\n[1/4] Building Docker images..."
+  echo -e "\n[1/4] Building Docker images..."
   cd "$PROJECT_ROOT"
 
+  export DOCKER_BUILDKIT=0
   docker build -t "$PROJECT_NAME/backend:latest" -f backend/Dockerfile .
   docker build -t "$PROJECT_NAME/ingestion:latest" -f ingestion/Dockerfile .
   docker build -t "$PROJECT_NAME/frontend:latest" -f frontend/Dockerfile .
@@ -36,7 +40,10 @@ build_images() {
 
 # --- Step 2: Push to ECR ---
 push_images() {
-  echo "\n[2/4] Pushing images to ECR..."
+  echo -e "\n[2/4] Pushing images to ECR..."
+
+  # Login to ECR first
+  aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com" 2>/dev/null
 
   for repo in backend ingestion frontend; do
     ECR_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$PROJECT_NAME/$repo"
@@ -50,8 +57,18 @@ push_images() {
 
 # --- Step 3: Terraform apply ---
 run_terraform() {
-  echo "\n[3/4] Applying Terraform infrastructure..."
+  echo -e "\n[3/4] Applying Terraform infrastructure..."
   cd "$PROJECT_ROOT/infra"
+
+  # DeepSeek API key: env var takes priority, then existing terraform.tfvars
+  if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+    echo "deepseek_api_key = \"${DEEPSEEK_API_KEY}\"" > terraform.tfvars
+    echo "  DeepSeek API key loaded from \$DEEPSEEK_API_KEY -> terraform.tfvars"
+  elif [ -f terraform.tfvars ]; then
+    echo "  Using existing terraform.tfvars"
+  else
+    echo "  WARNING: DEEPSEEK_API_KEY not set and no terraform.tfvars — LLM will fall back to template mode"
+  fi
 
   terraform init
   terraform plan -out=tfplan
@@ -63,7 +80,7 @@ run_terraform() {
 
 # --- Step 4: Update ECS services ---
 update_services() {
-  echo "\n[4/4] Updating ECS services (rolling deploy)..."
+  echo -e "\n[4/4] Updating ECS services (rolling deploy)..."
   CLUSTER="$PROJECT_NAME-prod"
 
   for svc in backend ingestion frontend; do
@@ -86,9 +103,9 @@ update_services() {
 
 # --- Run ---
 if [ "${1:-}" = "--all" ] || [ "${1:-}" = "" ]; then
+  run_terraform
   build_images
   push_images
-  run_terraform
   update_services
 else
   for arg in "$@"; do
@@ -101,7 +118,7 @@ else
   done
 fi
 
-echo "\n============================================================"
+echo -e "\n============================================================"
 echo "  Deploy complete!"
 echo "  ALB DNS: $(cd infra && terraform output -raw alb_dns 2>/dev/null || echo 'run terraform output')"
 echo "============================================================"

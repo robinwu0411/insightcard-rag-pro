@@ -1,4 +1,4 @@
-"""Embedding client — supports local (ChromaDB built-in), TEI service, and OpenAI.
+"""Embedding client — supports local (sentence-transformers), TEI service, and OpenAI.
 
 Ingestion uses this to embed chunks before writing to vector store.
 Backend uses this to embed user queries before retrieval.
@@ -22,15 +22,24 @@ class EmbeddingClient:
 
 
 class LocalEmbeddingClient(EmbeddingClient):
-    """Uses ChromaDB's built-in all-MiniLM-L6-v2 (ONNX) — zero external deps."""
+    """Uses sentence-transformers all-MiniLM-L6-v2 (ONNX/CPU) — no external API needed.
+
+    Model downloads on first use and caches locally (~90MB).
+    Produces 384-dim vectors matching the OpenSearch index dimension.
+    """
 
     def __init__(self):
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-        self._ef = DefaultEmbeddingFunction()
-        logger.info("LocalEmbeddingClient initialized (all-MiniLM-L6-v2 via ONNX)")
+        from sentence_transformers import SentenceTransformer
+        self._model = SentenceTransformer(config.embedding_model)
+        logger.info(f"LocalEmbeddingClient initialized (model={config.embedding_model})")
 
     def embed_batch(self, texts):
-        return self._ef(texts)
+        embeddings = self._model.encode(
+            texts,
+            batch_size=config.embedding_batch_size,
+            convert_to_numpy=True,
+        ).tolist()
+        return embeddings
 
 
 class TEIEmbeddingClient(EmbeddingClient):

@@ -1,4 +1,20 @@
 services:
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -v red || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   backend:
     build:
       context: .
@@ -6,26 +22,42 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - VECTOR_STORE_TYPE=chromadb
+      - VECTOR_STORE_TYPE=opensearch
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - OPENSEARCH_SSL=false
+      - OPENSEARCH_AUTH=none
       - EMBEDDING_PROVIDER=local
       - LLM_PROVIDER=openai
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
       - PYTHONPATH=/app
     volumes:
       - ./backend/knowledge_docs:/app/backend/knowledge_docs
-      - chroma_data:/tmp/insightcard_chromadb
+      - hf_cache:/root/.cache/huggingface
+    depends_on:
+      opensearch:
+        condition: service_healthy
 
   ingestion:
     build:
       context: .
       dockerfile: ingestion/Dockerfile
     environment:
-      - VECTOR_STORE_TYPE=chromadb
+      - VECTOR_STORE_TYPE=opensearch
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - OPENSEARCH_SSL=false
+      - OPENSEARCH_AUTH=none
       - EMBEDDING_PROVIDER=local
       - PYTHONPATH=/app
     volumes:
       - ./backend/knowledge_docs:/app/backend/knowledge_docs
-      - chroma_data:/tmp/insightcard_chromadb
+      - hf_cache:/root/.cache/huggingface
+    depends_on:
+      opensearch:
+        condition: service_healthy
     command: ["python", "-m", "ingestion.worker", "--mode", "batch"]
 
   frontend:
@@ -38,4 +70,5 @@ services:
       - backend
 
 volumes:
-  chroma_data:
+  opensearch_data:
+  hf_cache:

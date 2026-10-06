@@ -1,4 +1,4 @@
-"""Vector store abstraction — supports ChromaDB (local dev) and Milvus (production).
+"""Vector store abstraction — supports OpenSearch (local + production) and Milvus.
 
 Both backend (query) and ingestion (write) use this module.
 """
@@ -22,58 +22,132 @@ class VectorStore:
         raise NotImplementedError
 
 
-class ChromaVectorStore(VectorStore):
-    """ChromaDB-based vector store for local development."""
+class OpenSearchVectorStore(VectorStore):
+    """OpenSearch vector store with k-NN support.
+
+    Auth modes:
+      - none:  local dev (docker-compose OpenSearch with security disabled)
+      - aws:   production (AWS SigV4 via IAM task role, no passwords)
+    """
 
     def __init__(self):
-        import chromadb
-        from chromadb.config import Settings
-        config.chroma_db_dir.mkdir(parents=True, exist_ok=True)
-        self._client = chromadb.PersistentClient(
-            path=str(config.chroma_db_dir),
-            settings=Settings(anonymized_telemetry=False),
+        from opensearchpy import OpenSearch, RequestsHttpConnection
+
+        host = config.opensearch_host.replace("https://", "").replace("http://", "")
+
+        if config.opensearch_auth == "aws":
+            import boto3
+            from opensearchpy import AWSV4SignerAuth
+            credentials = boto3.Session().get_credentials()
+            auth = AWSV4SignerAuth(credentials, config.aws_region, "es")
+        else:
+            auth = None  # local dev, security plugin disabled
+
+        self._client = OpenSearch(
+            hosts=[{"host": host, "port": config.opensearch_port}],
+            http_auth=auth,
+            use_ssl=config.opensearch_ssl,
+            verify_certs=config.opensearch_ssl,
+            connection_class=RequestsHttpConnection,
+            timeout=30,
         )
-        self._collection = self._client.get_or_create_collection(
-            name=config.collection_name,
-            metadata={"description": "Vendor growth knowledge base"},
-        )
+        self._index = config.collection_name
+        self._create_index_if_not_exists()
+
+    def _create_index_if_not_exists(self):
+        from opensearchpy import NotFoundError
+        try:
+            self._client.indices.get(self._index)
+        except NotFoundError:
+            self._client.indices.create(self._index, body={
+                "settings": {"index.knn": True},
+                "mappings": {"properties": {
+                    "embedding": {
+                        "type": "knn_vector",
+                        "dimension": config.embedding_dim,
+                        "method": {
+                            "name": "hnsw",
+                            "engine": "nmslib",
+                            "parameters": {"m": 16, "ef_construction": 200},
+                        },
+                    },
+                    "text": {"type": "text"},
+                    "source": {"type": "keyword"},
+                    "section": {"type": "text"},
+                    "title": {"type": "keyword"},
+                    "timestamp": {"type": "keyword"},
+                }},
+            })
 
     def add(self, ids, texts, metadatas, embeddings):
-        self._collection.add(
-            ids=ids,
-            documents=texts,
-            metadatas=metadatas,
-            embeddings=embeddings,
-        )
+        from opensearchpy.helpers import bulk
+        actions = [{
+            "_index": self._index,
+            "_id": ids[i],
+            "_source": {
+                "embedding": embeddings[i],
+                "text": texts[i],
+                "source": metadatas[i].get("source", ""),
+                "section": metadatas[i].get("section", ""),
+                "title": metadatas[i].get("title", ""),
+                "timestamp": metadatas[i].get("timestamp", ""),
+            },
+        } for i in range(len(ids))]
+        bulk(self._client, actions)
+        self._client.indices.refresh(index=self._index)
 
     def query(self, query_embedding, top_k=8, filter_metadata=None):
-        results = self._collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            include=["documents", "metadatas", "distances"],
-            where=filter_metadata,
-        )
-        if not results["documents"] or not results["documents"][0]:
-            return []
-        return [
-            {
-                "text": doc,
-                "metadata": meta,
-                "distance": dist,
-                "semantic_score": max(0.0, 1.0 - dist),
+        query_body = {
+            "size": top_k,
+            "query": {"knn": {"embedding": {"vector": query_embedding, "k": top_k}}},
+        }
+        if filter_metadata:
+            query_body["query"]["knn"]["embedding"]["filter"] = {
+                "bool": {"filter": [{"term": {k: v}} for k, v in filter_metadata.items()]}
             }
-            for doc, meta, dist in zip(
-                results["documents"][0],
-                results["metadatas"][0],
-                results["distances"][0],
-            )
-        ]
+        results = self._client.search(index=self._index, body=query_body)
+        hits = results["hits"]["hits"]
+        return [{
+            "text": hit["_source"].get("text", ""),
+            "metadata": {
+                "source": hit["_source"].get("source", ""),
+                "section": hit["_source"].get("section", ""),
+                "title": hit["_source"].get("title", ""),
+                "timestamp": hit["_source"].get("timestamp", ""),
+            },
+            "distance": 1 - hit["_score"],
+            "semantic_score": hit["_score"],
+        } for hit in hits]
+
+    def list_sources(self, limit: int = 100) -> list[dict]:
+        """Return stored chunks for debugging / source listing."""
+        results = self._client.search(
+            index=self._index,
+            body={
+                "size": limit,
+                "query": {"match_all": {}},
+                "_source": ["text", "source", "section", "title", "timestamp"],
+            },
+        )
+        sources = []
+        for hit in results["hits"]["hits"]:
+            src = hit["_source"]
+            text = src.get("text", "")
+            sources.append({
+                "id": hit["_id"],
+                "source": src.get("source", ""),
+                "section": src.get("section", ""),
+                "preview": text[:120] + "..." if len(text) > 120 else text,
+            })
+        return sources
 
     def count(self):
-        return self._collection.count()
+        return self._client.count(index=self._index)["count"]
 
     def delete(self, ids):
-        self._collection.delete(ids=ids)
+        for id_ in ids:
+            self._client.delete(index=self._index, id=id_, ignore=[404])
+        self._client.indices.refresh(index=self._index)
 
 
 class MilvusVectorStore(VectorStore):
@@ -163,6 +237,8 @@ class MilvusVectorStore(VectorStore):
 
 def get_vector_store() -> VectorStore:
     """Factory: returns the configured vector store implementation."""
-    if config.vector_store_type == "milvus":
+    if config.vector_store_type == "opensearch":
+        return OpenSearchVectorStore()
+    elif config.vector_store_type == "milvus":
         return MilvusVectorStore()
-    return ChromaVectorStore()
+    raise ValueError(f"Unknown vector_store_type: {config.vector_store_type}. Supported: opensearch, milvus")

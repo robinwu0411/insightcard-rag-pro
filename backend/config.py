@@ -7,7 +7,6 @@ from shared.config import config
 HOST = config.host
 PORT = config.port
 KNOWLEDGE_DOCS_DIR = config.knowledge_docs_dir
-CHROMA_DB_DIR = config.chroma_db_dir
 COLLECTION_NAME = config.collection_name
 CHUNK_SIZE = config.chunk_size
 CHUNK_OVERLAP = config.chunk_overlap

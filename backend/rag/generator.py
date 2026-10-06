@@ -1,7 +1,8 @@
 """RAG generator — produces InsightCard recommendations via LLM or template fallback.
 
-Two modes:
-  1. OpenAI mode (if OPENAI_API_KEY set): streams real LLM tokens via GPT-4o-mini
+Three modes:
+  1. OpenAI-compatible mode (if OPENAI_API_KEY set): streams real LLM tokens.
+     Supports OpenAI, DeepSeek, and any OpenAI-compatible API via OPENAI_BASE_URL.
   2. Bedrock mode (if LLM_PROVIDER=bedrock): uses AWS Bedrock (Claude)
   3. Template mode (default): extracts actions from retrieved chunks, streams word-by-word
 """
@@ -237,7 +238,10 @@ def generate_with_openai(metric: MetricResult, chunks: list[RetrievedChunk]) -> 
         yield from generate_with_template(metric, chunks)
         return
 
-    client = OpenAI(api_key=config.openai_api_key)
+    client = OpenAI(
+        api_key=config.openai_api_key,
+        base_url=config.openai_base_url or None,  # None → default OpenAI; set to DeepSeek/other compatible endpoint
+    )
     prompt = _build_openai_prompt(metric, chunks)
 
     stream = client.chat.completions.create(

@@ -146,8 +146,12 @@ class MockDynamoDBClient:
 
 
 def get_dynamodb_client():
-    """Factory: returns DynamoDB client or mock for local dev."""
-    if config.vector_store_type == "chromadb":
+    """Factory: returns DynamoDB client or mock for local dev.
+
+    Local dev (OPENSEARCH_AUTH=none) uses mock — no real DynamoDB needed.
+    Production (OPENSEARCH_AUTH=aws) connects to real DynamoDB via IAM.
+    """
+    if config.opensearch_auth == "none":
         return MockDynamoDBClient()
     try:
         return DynamoDBClient()

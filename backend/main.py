@@ -32,8 +32,13 @@ from shared.config import config
 from backend.tools.metric_tools import (
     get_metric, list_available_metrics, get_scorecard_summary,
 )
-from backend.rag.pipeline import prepare_insight_card, stream_insight_recommendation
+from backend.rag.pipeline import (
+    prepare_insight_card,
+    stream_insight_recommendation,
+    astream_insight_recommendation,
+)
 from backend.rag.generator import _status_label, _gap_pct
+from backend.rag.graph import get_rag_graph
 from backend.rag.chunker import ingest_directory
 from backend.rag.cleaner import clean_chunks
 from shared.vector_store import get_vector_store
@@ -45,8 +50,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="InsightCard RAG Pro",
-    description="Vendor Performance Insight Card with RAG-powered recommendations",
-    version="2.0.0",
+    description="Vendor Performance Insight Card with LangGraph-powered RAG pipeline",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -61,8 +66,8 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     """Ensure knowledge base is ingested on startup (local dev only)."""
-    if config.vector_store_type == "chromadb":
-        logger.info("Local dev mode — ingesting knowledge docs on startup...")
+    if config.vector_store_type in ("opensearch", "milvus"):
+        logger.info(f"Auto-ingesting knowledge docs on startup (vector_store={config.vector_store_type})...")
         try:
             vs = get_vector_store()
             if vs.count() == 0 and config.knowledge_docs_dir.exists():
@@ -96,6 +101,45 @@ async def health():
         "vector_store": config.vector_store_type,
         "embedding_provider": config.embedding_provider,
         "llm_provider": config.llm_provider if config.use_openai else "template",
+        "pipeline": "langgraph",
+    }
+
+
+@app.get("/api/graph")
+async def graph_topology():
+    """Return the LangGraph pipeline topology (nodes + edges)."""
+    return {
+        "framework": "langgraph",
+        "nodes": [
+            "fetch_metric",
+            "build_query",
+            "vector_search",
+            "hybrid_rerank",
+            "build_card",
+            "generate_openai",
+            "generate_bedrock",
+            "generate_template",
+            "save_memory",
+        ],
+        "edges": [
+            {"from": "__start__", "to": "fetch_metric"},
+            {"from": "fetch_metric", "to": "build_query"},
+            {"from": "build_query", "to": "vector_search"},
+            {"from": "vector_search", "to": "hybrid_rerank"},
+            {"from": "hybrid_rerank", "to": "build_card"},
+            {"from": "build_card", "to": "generate_openai", "type": "conditional"},
+            {"from": "build_card", "to": "generate_bedrock", "type": "conditional"},
+            {"from": "build_card", "to": "generate_template", "type": "conditional"},
+            {"from": "generate_openai", "to": "save_memory"},
+            {"from": "generate_bedrock", "to": "save_memory"},
+            {"from": "generate_template", "to": "save_memory"},
+            {"from": "save_memory", "to": "__end__"},
+        ],
+        "conditional_router": "route_generation (build_card -> generate_{openai|bedrock|template})",
+        "description": (
+            "Two-stage retrieval (vector search -> hybrid rerank + MMR) "
+            "preserved as custom graph nodes. LLM routing via conditional edge."
+        ),
     }
 
 
@@ -159,13 +203,26 @@ async def insight_stream(
 ):
     session_id = x_session_id or str(uuid4())
 
-    def event_generator():
+    # Use async graph streaming for true token-level streaming via
+    # LangGraph's astream_events (on_chat_model_stream from ChatOpenAI).
+    # Falls back to sync generator if async path hits an error.
+    async def event_generator():
         try:
-            for event in stream_insight_recommendation(vendor_id, metric_name, period, session_id):
+            async for event in astream_insight_recommendation(
+                vendor_id, metric_name, period, session_id
+            ):
                 yield event
         except Exception as e:
-            logger.error(f"Stream error: {e}", exc_info=True)
-            yield {"event": "error", "data": json.dumps({"error": str(e)})}
+            logger.error(f"Async stream error: {e}", exc_info=True)
+            logger.info("Falling back to sync stream...")
+            try:
+                for event in stream_insight_recommendation(
+                    vendor_id, metric_name, period, session_id
+                ):
+                    yield event
+            except Exception as e2:
+                logger.error(f"Sync fallback also failed: {e2}", exc_info=True)
+                yield {"event": "error", "data": json.dumps({"error": str(e2)})}
 
     return EventSourceResponse(event_generator())
 
@@ -220,17 +277,9 @@ async def trigger_ingest(force: bool = False):
 @app.get("/api/rag/sources")
 async def list_sources():
     vs = get_vector_store()
-    # This works for ChromaDB; for Milvus would need a different query
-    if hasattr(vs, '_collection'):
-        results = vs._collection.get(include=["documents", "metadatas"], limit=100)
-        sources = []
-        for i, (doc, meta) in enumerate(zip(results["documents"], results["metadatas"])):
-            sources.append({
-                "id": results["ids"][i],
-                "source": meta.get("source", ""),
-                "section": meta.get("section", ""),
-                "preview": doc[:120] + "..." if len(doc) > 120 else doc,
-            })
+    # OpenSearchVectorStore implements list_sources(); Milvus falls back to empty
+    if hasattr(vs, 'list_sources'):
+        sources = vs.list_sources(limit=100)
         return {"total": vs.count(), "sources": sources}
     return {"total": vs.count(), "sources": []}
 

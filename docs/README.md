@@ -35,7 +35,7 @@
      ▼      ▼                  ▼
 ┌────────┐ ┌────────────┐ ┌──────────┐
 │DynamoDB│ │ 向量数据库  │ │ OpenAI/  │
-│(记忆+  │ │ (ChromaDB/ │ │ Bedrock  │
+│(记忆+  │ │ (OpenSearch/│ │ Bedrock  │
 │ 元数据)│ │  Milvus)   │ │ (LLM)    │
 └────────┘ └────────────┘ └──────────┘
 
@@ -93,7 +93,7 @@ CI/CD: GitHub Actions (按路径过滤独立构建)
 | 模块 | 文件 | 职责 |
 |------|------|------|
 | shared/config | shared/config.py | 全局配置 (环境变量驱动) |
-| shared/vector_store | shared/vector_store.py | 向量库抽象 (ChromaDB/Milvus) |
+| shared/vector_store | shared/vector_store.py | 向量库抽象 (OpenSearch/Milvus) |
 | shared/embedding | shared/embedding_client.py | Embedding 客户端 (local/TEI/OpenAI) |
 | shared/dynamodb | shared/dynamodb_client.py | DynamoDB 封装 (元数据+记忆) |
 | shared/s3 | shared/s3_client.py | S3 文件下载/上传 |

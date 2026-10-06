@@ -21,9 +21,12 @@ yarn-error.log*
 dist/
 .vite/
 
-# ChromaDB local data
+# ChromaDB local data (deprecated — keeping just in case)
 chroma_data/
 chroma_db/
+
+# OpenSearch local data (Docker volume)
+opensearch_data/
 
 # Environment variables
 .env
@@ -45,6 +48,8 @@ chroma_db/
 .terraform/
 .terraform.lock.hcl
 terraform.tfvars
+*.tfplan
+infra/tfplan
 
 # AWS
 .aws/

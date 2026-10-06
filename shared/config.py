@@ -20,18 +20,24 @@ class Config:
     dynamodb_table_metadata: str = os.environ.get("DDB_TABLE_METADATA", "rag_metadata")
     dynamodb_table_memory: str = os.environ.get("DDB_TABLE_MEMORY", "rag_short_term_memory")
 
-    # --- Vector Store (Milvus / pgvector) ---
-    vector_store_type: str = os.environ.get("VECTOR_STORE_TYPE", "chromadb")  # chromadb | milvus | pgvector
+    # --- Vector Store (OpenSearch / Milvus) ---
+    vector_store_type: str = os.environ.get("VECTOR_STORE_TYPE", "opensearch")  # opensearch | milvus
     milvus_host: str = os.environ.get("MILVUS_HOST", "localhost")
     milvus_port: int = int(os.environ.get("MILVUS_PORT", "19530"))
-    pg_connection_string: str = os.environ.get("PG_CONNECTION_STRING", "")
     collection_name: str = os.environ.get("COLLECTION_NAME", "vendor_growth_knowledge")
+    # --- OpenSearch ---
+    opensearch_host: str = os.environ.get("OPENSEARCH_HOST", "localhost")
+    opensearch_port: int = int(os.environ.get("OPENSEARCH_PORT", "9200"))
+    opensearch_ssl: bool = os.environ.get("OPENSEARCH_SSL", "false").lower() == "true"
+    # local dev: no auth; production: AWS SigV4 via IAM task role
+    opensearch_auth: str = os.environ.get("OPENSEARCH_AUTH", "none")  # none | aws
 
     # --- Embedding ---
     embedding_provider: str = os.environ.get("EMBEDDING_PROVIDER", "local")  # local | openai | tei
     embedding_model: str = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
     tei_endpoint: str = os.environ.get("TEI_ENDPOINT", "http://localhost:8080")
     openai_api_key: str = os.environ.get("OPENAI_API_KEY", "")
+    openai_base_url: str = os.environ.get("OPENAI_BASE_URL", "")  # OpenAI-compatible endpoint, e.g. https://api.deepseek.com
     embedding_dim: int = int(os.environ.get("EMBEDDING_DIM", "384"))
     embedding_batch_size: int = int(os.environ.get("EMBEDDING_BATCH_SIZE", "64"))
 
@@ -53,7 +59,6 @@ class Config:
 
     # --- Local dev paths ---
     knowledge_docs_dir: Path = Path(__file__).parent.parent / "backend" / "knowledge_docs"
-    chroma_db_dir: Path = Path(os.environ.get("CHROMA_DB_DIR", "/tmp/insightcard_chromadb"))
 
     @property
     def use_openai(self) -> bool:
